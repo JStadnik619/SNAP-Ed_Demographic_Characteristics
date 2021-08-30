@@ -1,0 +1,1031 @@
+---
+title: "Group C1 Final Data Project Report"
+author: "Jamie Stadnik, Feiran Zhang, Guanghao Zhai"
+date: "7/28/2021"
+output:
+  html_document: 
+    theme: readable
+    toc: yes
+urlcolor: cyan
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Modelling the Relationship Between SNAP-Ed Participation and Demographic Characteristics
+
+## Introduction
+
+The Supplemental Nutrition Assistance Program (SNAP) provides support to low-income households for purchasing food from authorized retailers. Its associated program, SNAP Education (SNAP-Ed), promotes healthy dietary choices, food budgeting, and physical activity to SNAP-eligible individuals. Both SNAP and SNAP-Ed are federally administered by the United States Department of Agriculture, and the Illinois Extension Division of Family & Consumer Sciences implements SNAP-Ed for the state of Illinois. Since equity is an increasingly high priority for SNAP-Ed, this study explores the relationship between demographic indicators and program participation. A sufficiently predictive and explainable model could help inform strategies for reaching underserved communities. This project is motivated by Jamie Stadnik's work as the Data Analyst for Illinois Extension Division of Family & Consumer Sciences. 
+
+### Background Information
+
+Six different data sets from two institutions are considered to serve the analysis. Their citations and brief descriptions are listed below.
+
+**2019: Census 2019 American Community Survey (ACS) 5-Year Estimates Subject Tables**
+
+The following tables are collected from the 2019 ACS, a yearly survey conducted by the United States Census Bureau to provide information regarding the socioeconomic conditions of Americans.
+
+- S1701: Poverty Status in the Past 12 Months
+	- https://data.census.gov/cedsci/table?q=S1701&g=0400000US17.140000&tid=ACSST5Y2019.S1701&hidePreview=true
+- S2201: Food Stamps/Supplemental Nutrition Assistance Program (SNAP)
+	- https://data.census.gov/cedsci/table?q=S2201&g=0400000US17.140000&tid=ACSST5Y2019.S2201&hidePreview=true
+- S1602: Limited English Speaking Households
+	- https://data.census.gov/cedsci/table?q=S1602&g=0400000US17.140000&tid=ACSST5Y2019.S1602&hidePreview=true
+	
+**Census Cartographic Boundary Files**
+
+The cartographic boundary files contain census tract geospatial data from the Census Bureau’s Topologically Integrated Geographic Encoding and Referencing (TIGER) Database. While generally used for mapping, the boundary files are utilized for relating census data to geographic coordinates in this project.
+
+- Illinois Census Tracts Shapefiles
+  - https://www.census.gov/geographies/mapping-files/time-series/geo/cartographic-boundary.2019.html
+
+**Program Evaluation And Reporting System (PEARS)**
+
+Developed by the Office of Educational Innovation and Evaluation at Kansas State University, PEARS is a web database that assists nutrition education professionals and Extension administrators in tracking program data and outcomes. 
+
+- https://www.k-state.edu/oeie/pears/
+- All PEARS Program Activity records reported in 2019 for the `Organization = University of Illinois Extension`.
+	- sheet = "Program Activity Data"
+	- sheet = "Sessions"
+
+### Data File Description
+
+The data file for this study is built from multiple data sources in order to relate SNAP-Ed session participant totals to demographic metrics collected by the 2019 Census. The observations are Illinois SNAP-Ed programming sessions from 2019, with 26,057 records in total. There are 12 variables, with `num_participants` serving as the response variable and various census tract metrics used for numerical predictors.The categorical predictor `region` is included as well.
+
+The following list compiles the variables from each data source:
+
+**PEARS Illinois Extension 2019 Program Activities**
+
+- `num_participants` - Total number of participants for the SNAP-Ed program activity session
+- `region` - SNAP-Ed region where the program activity session took place
+
+**2019 American Community Survey 5-Year Estimates**
+
+*S1701: Poverty Status in the Past 12 Months*
+
+- `individuals_income_below_185_percent_poverty_level` - Total individuals who are eligible for SNAP-Ed since their income is below 185% of the federal poverty level
+
+*S2201: Food Stamps/Supplemental Nutrition Assistance Program (SNAP)*
+
+- `total_snap_recipient_households_american_indian_and_alaska_native`
+- `total_snap_recipient_households_asian`
+- `total_snap_recipient_households_black_or_african_american`
+- `total_snap_recipient_households_native_hawaiian_and_other_pacific_islander`
+- `total_snap_recipient_households_white`
+- `total_snap_recipient_households_hispanic_or_latino_origin`
+- `total_snap_recipient_households_non_hispanic_or_latino_origin`
+
+Total SNAP recipient households for each census race and ethnicity category.
+
+*S1602: Limited English Speaking Households*
+
+- `total_lep_households` - Total limited English proficiency households
+
+**Census Cartographic Boundary Files**
+
+- `ALAND` - Census tract land area in square meters
+
+The cleaned data file `sessions_census_data2.csv` is included in the zip file for this report.
+
+## Methods
+
+### Compiling the Data Set
+
+First, the data sets must be loaded into `R`.
+
+```{r message=FALSE, warning=FALSE, echo = TRUE, results = "hide"}
+library(readxl)
+library(data.table)
+library(sf)
+library(s2)
+s2_available = !inherits(try(sf_use_s2(TRUE), silent = TRUE)
+                         , "try-error")
+
+#PEARS Data
+
+PA <-
+  read_excel("Program Activities Export FY2019.xlsx", sheet = "Program Activity Data")
+
+Sessions <-
+  read_excel("Program Activities Export FY2019.xlsx", sheet = "Sessions")
+
+SNAP_Ed_Regions <- fread("SNAP-Ed Regions.csv")
+
+#S1701: Poverty Status in the Past 12 Months
+
+S1701_Poverty_Tracts <-
+  fread(
+    "./ACSST5Y2019.S1701_2021-03-11T131242/ACSST5Y2019.S1701_data_with_overlays_2021-03-11T131230.csv",
+    skip = 1,
+    select = c(
+      'id',
+      'Geographic Area Name',
+      'Estimate!!Total!!Population for whom poverty status is determined!!ALL INDIVIDUALS WITH INCOME BELOW THE FOLLOWING POVERTY RATIOS!!185 percent of poverty level'
+    )
+  )
+
+#S2201: Food Stamps/SNAP
+
+S2201_SNAP_Tracts <-
+  fread(
+    "./ACSST5Y2019.S2201_2021-04-29T110540/ACSST5Y2019.S2201_data_with_overlays_2021-04-29T110521.csv",
+    skip = 1,
+    select = c(
+      'id',
+      'Geographic Area Name',
+      'Estimate!!Households receiving food stamps/SNAP!!Households',
+      'Estimate!!Households receiving food stamps/SNAP!!Households!!RACE AND HISPANIC OR LATINO ORIGIN OF HOUSEHOLDER!!White alone',
+      'Estimate!!Households receiving food stamps/SNAP!!Households!!RACE AND HISPANIC OR LATINO ORIGIN OF HOUSEHOLDER!!Black or African American alone',
+      'Estimate!!Households receiving food stamps/SNAP!!Households!!RACE AND HISPANIC OR LATINO ORIGIN OF HOUSEHOLDER!!American Indian and Alaska Native alone',
+      'Estimate!!Households receiving food stamps/SNAP!!Households!!RACE AND HISPANIC OR LATINO ORIGIN OF HOUSEHOLDER!!Asian alone',
+      'Estimate!!Households receiving food stamps/SNAP!!Households!!RACE AND HISPANIC OR LATINO ORIGIN OF HOUSEHOLDER!!Native Hawaiian and Other Pacific Islander alone',
+      'Estimate!!Households receiving food stamps/SNAP!!Households!!RACE AND HISPANIC OR LATINO ORIGIN OF HOUSEHOLDER!!Hispanic or Latino origin (of any race)'
+    )
+  )
+
+#S1602: Limited English Speaking Households
+
+S1602_LEP_Tracts <-
+  fread(
+    "./ACSST5Y2019.S1602_Tracts/ACSST5Y2019.S1602_data_with_overlays_2021-05-04T175629.csv",
+    skip = 1,
+    select = c(
+      'id',
+      'Geographic Area Name',
+      'Estimate!!Limited English-speaking households!!All households'
+    )
+  )
+
+#Illinois Census Tracts Shapefile
+
+IL_tracts_sf <- st_read("./cb_2019_17_tract_500k")
+```
+
+The function `readxl::read_excel()` is used to read in `.xlsx` files and `sf::st_read()` imports the Illinois census tracts shapefile. This shapefile is used to relate census tracts to SNAP-Ed sessions via the session geographic coordinates. The relevant census datasets contain hundreds of variables, so `data.table::fread()` is used to filter specific fields to import from their `.csv` files.
+
+Since data from seven different files is relevant to this study, extensive datacleaning is required to generate the model's data set. The next step is to load in the necessary packages. 
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(textclean)
+```
+
+With all the libraries loaded, the PEARS data can be filtered and combined.
+
+```{r}
+PA <- PA %>% filter(program_areas == "SNAP-Ed" & delivery_method == "Face-to-face" & !grepl("TEST", PA$name) & unit != "Illinois (State)") %>% 
+  select(program_id, name, program_areas, delivery_method, site_id, site_name, site_county, site_latitude, site_longitude)
+
+PA_Sessions <- inner_join(PA, Sessions[, c("session_id", "program_id", "start_date_with_time", "num_participants")], by = "program_id") %>%
+  distinct(program_id, start_date_with_time, .keep_all = TRUE)
+```
+
+Records of `PA` are filtered to include only valid SNAP-Ed program activities delivered "Face-to-face" at non-statewide locations. Only variables relevant to data preparation or analysis are selected. Then the program activities are joined with their respective sessions and duplicate sessions are removed.
+
+The data set currently has one relevant categorical predictor, `site_county`, which accounts for geographic and environmental differences between session locations. However, `site_county` has `r length(unique(PA_Sessions$site_county))` unique values, which would result in `r length(unique(PA_Sessions$site_county)) - 1` dummy variables. Including this many dummy variables would impede the goal of creating a model with high explainability. So the `site_county` field is related to SNAP-Ed regions in order to account for geographic factors without introducing excessive model complexity.
+
+```{r}
+PA_Sessions <- left_join(PA_Sessions, SNAP_Ed_Regions[, c("Region", "County")], by = c("site_county" = "County")) %>%
+  rename(region = "Region")
+```
+
+There are `r length(unique(PA_Sessions$region))` regions: `r sort(unique(PA_Sessions$region))`. This categorical predictor can factor broad geographic differences into the model without significantly impacting explainability. 
+
+Next, `PA_Sessions` is joined with census tracts (`IL_tracts_sf`) using geographic coordinates and several functions from the `sf` package.
+
+```{r}
+PA_Sessions_sf <-
+  st_as_sf(PA_Sessions, coords = c("site_longitude", "site_latitude"))
+
+st_crs(PA_Sessions_sf) <- st_crs(IL_tracts_sf)
+
+PA_Sessions_sf_joined <-
+  st_join(PA_Sessions_sf,
+          IL_tracts_sf %>% select(AFFGEOID, ALAND))
+
+PA_Sessions_Tracts <-
+  as.data.frame(PA_Sessions_sf_joined) %>% select(session_id, num_participants, AFFGEOID, ALAND, region)
+```
+
+The resulting dataframe `PA_Sessions_Tracts` consists of program activity sessions and the census tract unique identifier `AFFGEOID` of their encompassing census tracts. The `AFFGEOID` allows SNAP-Ed sessions to be joined with census metrics from the American Community Survey subject tables.
+
+Before joining SNAP-Ed sessions with demographic data, the applicable census data (`S1701_Poverty_Tracts`, `S2201_SNAP_Tracts`, `S1602_LEP_Tracts`) must be cleaned and combined.
+
+```{r}
+S1701_Poverty_Tracts <-
+  S1701_Poverty_Tracts %>% rename(
+    AFFGEOID = 'id',
+    geographic_area_name = 'Geographic Area Name',
+    individuals_income_below_185_percent_poverty_level = 'Estimate!!Total!!Population for whom poverty status is determined!!ALL INDIVIDUALS WITH INCOME BELOW THE FOLLOWING POVERTY RATIOS!!185 percent of poverty level'
+  )
+
+names(S2201_SNAP_Tracts) <-
+  mgsub(
+    colnames(S2201_SNAP_Tracts),
+    c(
+      " alone",
+      " (of any race)",
+      "Estimate!!Households receiving food stamps/SNAP!!",
+      "Estimate!!Households receiving food stamps/SNAP!!Households!!RACE AND HISPANIC OR LATINO ORIGIN OF HOUSEHOLDER!!",
+      " "
+    ),
+    c(
+      "",
+      "",
+      "total_snap_recipient_households_",
+      "total_snap_recipient_households_",
+      "_"
+    )
+  )
+names(S2201_SNAP_Tracts) <- tolower(names(S2201_SNAP_Tracts))
+
+S2201_SNAP_Tracts <- S2201_SNAP_Tracts %>% rename(AFFGEOID = 'id')
+
+S2201_SNAP_Tracts$total_population_non_hispanic_or_latino_origin <- S2201_SNAP_Tracts$total_snap_recipient_households_households - S2201_SNAP_Tracts$total_snap_recipient_households_hispanic_or_latino_origin
+
+S1602_LEP_Tracts <- S1602_LEP_Tracts %>% rename(
+  AFFGEOID = 'id',
+  geographic_area_name = 'Geographic Area Name',
+  total_lep_households = 'Estimate!!Limited English-speaking households!!All households'#,
+)
+
+census_data <-
+  left_join(S1701_Poverty_Tracts,
+            S2201_SNAP_Tracts,
+            by = c("AFFGEOID", "geographic_area_name"))
+census_data <-
+  left_join(census_data,
+            S1602_LEP_Tracts,
+            by = c("AFFGEOID", "geographic_area_name"))
+
+sessions_census_data <- left_join(PA_Sessions_Tracts,
+                                  census_data,
+                                  by = "AFFGEOID")
+
+sessions_census_data2 <-
+  sessions_census_data %>% select(-c(session_id, AFFGEOID, geographic_area_name, total_snap_recipient_households_households))
+```
+
+Since the default field names of the census subject tables would be cumbersome to work with, they are renamed using a streamlined format. The census reports the non-hispanic or latino ethnicity subset by whites only. To examine the full scope of this ethnic category, the complement of `total_snap_recipient_households_hispanic_or_latino_origin` is calculated independent of race. Once combined into a single dataframe `sessions_census_data`, the fields that do not serve the analysis are removed.
+
+### Model Selection
+
+#### Full Additive Model
+
+The first model tested was an additive model of response variable `num_participants` and the remaining variables as predictors.
+
+```{r}
+num_participants_add <- lm(num_participants ~ ., data = sessions_census_data2)
+
+num_participants_add_adj_r_2 <- summary(num_participants_add)$adj.r.squared
+num_participants_add_adj_r_2 
+```
+
+With an adjusted $R^2$ of only `r num_participants_add_adj_r_2`, the predictive capability of this model is very weak.
+
+#### All Possible Two-Way Interactions Model
+
+Since the full additive model had such a low adjusted $R^2$, a model with all possible two-way interactions was explored.
+
+```{r}
+num_participants_int <- lm(num_participants ~ (.)^2, data = sessions_census_data2)
+
+num_participants_int_adj_r_2 <- summary(num_participants_int)$adj.r.squared
+num_participants_int_adj_r_2 
+```
+
+While this model has a marginally improved adjusted $R^2$ (`r num_participants_int_adj_r_2 `), it is still quite weak.
+
+#### AIC Backward Search Model
+
+An AIC backward search was conducted using the model with all possible two-way interactions as a starting point.
+
+```{r}
+num_participants_selected <- step(num_participants_int, trace = FALSE)
+
+num_participants_selected_adj_r_2 <- summary(num_participants_selected)$adj.r.squared
+num_participants_selected_adj_r_2 
+```
+
+Again, the selected model provided a negligible improvement in adjusted $R^2$ over the starting model.
+
+## Results
+
+**Table 1:** Summary Parameters for SNAP-Ed Participation Models
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+
+model_p_val <- function(model) {
+  pf(summary(model)$fstatistic[1],
+     summary(model)$fstatistic[2],
+     summary(model)$fstatistic[3], lower.tail = FALSE)
+}
+
+tab1 <- data.frame("Model" = c("Full Additive Model", "All Possible Two-Way Interactions Model", "AIC Backward Search Model"), "R.Squared" = c(summary(num_participants_add)$r.squared, summary(num_participants_int)$r.squared, summary(num_participants_selected)$r.squared),"Adjusted.R.Squared" = c(num_participants_add_adj_r_2, num_participants_int_adj_r_2, num_participants_selected_adj_r_2), "P.Value" = c(model_p_val(num_participants_add), model_p_val(num_participants_int), model_p_val(num_participants_selected)))
+kable(tab1)
+```
+
+## Discussion
+
+As seen in **Table 1** of the Results section, all of the models examined have such low $R^2$ and adjusted $R^2$ values that they cannot effectively predict SNAP-ED participation. For each model, at least 90% of the observed variability in `num_participants` is not explained by the linear relationship with their predictors. It stands to reason that variables beyond those assessed by these models impact SNAP-Ed participation more significantly than demographic characteristics. For example, session location, promotional activity, date and time, curriculum content, or other factors could all play a larger role in program attendance. The p-values in **Table 1** are from a $F$ test comparing each model to a null model. Each model is preferred over the null model since their p-values are nearly zero. However, the low predictive ability of the models makes any conclusions drawn from predictor estimates dubious. Therefore, these models cannot be used to explain the relationship between SNAP-Ed participation and demographic characteristics. However, modeling an alternative response variable may provide more fruitful analysis for equity considerations.   
+
+# Modelling the Relationship Between SNAP-Ed Eligibility and Demographic Characteristics
+
+## Introduction
+
+Although our attempts to model SNAP-Ed participation based on demographic characteristics did not produce a sufficiently predictive model, these characteristics may influence SNAP-Ed eligibility more significantly. A stronger understanding of the relationship between SNAP-Ed eligibility and the racial, ethnic, and lingual composition of communities could help tailor SNAP-Ed programming to diverse participants.
+
+### Data File Description
+
+The data for this analysis is compiled from some of the same census sources used in the previous study. Each observation is an Illinois census tract from the 2019 census, with 3,123 total. SNAP-Ed eligibility is determined by whether an individual's income is below 185% of the federal poverty level. The total number of SNAP-Ed eligible individuals for each census tract is denoted as `individuals_income_below_185_percent_poverty_level` in the model data.
+
+The variables from each data source are listed below along with a brief justification for their inclusion:
+
+**2019 American Community Survey 5-Year Estimates**
+
+*S1701: Poverty Status in the Past 12 Months*
+
+- `individuals_income_below_185_percent_poverty_level` 
+- `total_population_white`
+- `total_population_black_or_african_american`
+- `total_population_american_indian_and_alaska_native`
+- `total_population_asian`
+- `total_population_native_hawaiian_and_other_pacific_islander`
+- `total_population_hispanic_or_latino_origin`
+- `total_population_non_hispanic_or_latino_origin`
+
+Demographic characteristics are assessed as total individuals per each category, as opposed to the SNAP recipient household counts used prior. Using total individuals ensures that the models include SNAP-Ed eligible individuals who are not SNAP recipients. 
+
+*S1602: Limited English Speaking Households*
+
+- `total_lep_households_spanish` 
+- `total_lep_households_other_indo_european_languages`
+- `total_lep_households_asian_and_pacific_island_languages`
+- `total_lep_households_other_languages`
+
+Total limited English proficiency households are subset by language spoken at the household. This allows for examining the role specific languages play in determining SNAP-Ed eligibility for a given community.
+
+In addition, the categorical predictor `region` (SNAP-Ed region that the census tract falls within) is determined by the county of each census tract.
+
+The cleaned data file `census_data2.csv` is included in the zip file for this report.
+
+## Methods
+
+### Compiling the Data Set
+
+First, the census subject tables and desired fields are imported.
+
+```{r}
+S1701_Poverty_Tracts <-
+  fread(
+    "./ACSST5Y2019.S1701_2021-03-11T131242/ACSST5Y2019.S1701_data_with_overlays_2021-03-11T131230.csv",
+    skip = 1,
+    select = c(
+      'id',
+      'Geographic Area Name',
+      'Estimate!!Total!!Population for whom poverty status is determined',
+      'Estimate!!Total!!Population for whom poverty status is determined!!ALL INDIVIDUALS WITH INCOME BELOW THE FOLLOWING POVERTY RATIOS!!185 percent of poverty level',
+      'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!White alone',
+      'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!Black or African American alone',
+      'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!American Indian and Alaska Native alone',
+      'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!Asian alone',
+      'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!Native Hawaiian and Other Pacific Islander alone',
+      'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!Hispanic or Latino origin (of any race)'
+    )
+  )
+
+S1602_LEP_Tracts <-
+  fread(
+    "./ACSST5Y2019.S1602_Tracts/ACSST5Y2019.S1602_data_with_overlays_2021-05-04T175629.csv",
+    skip = 1,
+    select = c(
+      'id',
+      'Geographic Area Name',
+      'Estimate!!Limited English-speaking households!!All households',
+      'Estimate!!Limited English-speaking households!!All households!!Households speaking --!!Spanish',
+      'Estimate!!Limited English-speaking households!!All households!!Households speaking --!!Other Indo-European languages',
+      'Estimate!!Limited English-speaking households!!All households!!Households speaking --!!Asian and Pacific Island languages',
+      'Estimate!!Limited English-speaking households!!All households!!Households speaking --!!Other languages'
+    )
+  )
+```
+
+Next, the census data is prepared for analysis.
+
+```{r}
+S1701_Poverty_Tracts <-
+  S1701_Poverty_Tracts %>% rename(
+    AFFGEOID = 'id',
+    geographic_area_name = 'Geographic Area Name',
+    total_population = 'Estimate!!Total!!Population for whom poverty status is determined',
+    individuals_income_below_185_percent_poverty_level = 'Estimate!!Total!!Population for whom poverty status is determined!!ALL INDIVIDUALS WITH INCOME BELOW THE FOLLOWING POVERTY RATIOS!!185 percent of poverty level',
+    total_population_white = 'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!White alone',
+    total_population_black_or_african_american = 'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!Black or African American alone',
+    total_population_american_indian_and_alaska_native = 'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!American Indian and Alaska Native alone',
+    total_population_asian = 'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!Asian alone',
+    total_population_native_hawaiian_and_other_pacific_islander = 'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!Native Hawaiian and Other Pacific Islander alone',
+    total_population_hispanic_or_latino_origin = 'Estimate!!Total!!Population for whom poverty status is determined!!RACE AND HISPANIC OR LATINO ORIGIN!!Hispanic or Latino origin (of any race)'#,
+  )
+
+S1701_Poverty_Tracts$total_population_non_hispanic_or_latino_origin <-
+  S1701_Poverty_Tracts$total_population - S1701_Poverty_Tracts$total_population_hispanic_or_latino_origin
+
+S1602_LEP_Tracts <- S1602_LEP_Tracts %>% rename(
+  AFFGEOID = 'id',
+  geographic_area_name = 'Geographic Area Name',
+  total_lep_households = 'Estimate!!Limited English-speaking households!!All households',
+  total_lep_households_spanish = 'Estimate!!Limited English-speaking households!!All households!!Households speaking --!!Spanish',
+  total_lep_households_other_indo_european_languages = 'Estimate!!Limited English-speaking households!!All households!!Households speaking --!!Other Indo-European languages',
+  total_lep_households_asian_and_pacific_island_languages = 'Estimate!!Limited English-speaking households!!All households!!Households speaking --!!Asian and Pacific Island languages',
+  total_lep_households_other_languages = 'Estimate!!Limited English-speaking households!!All households!!Households speaking --!!Other languages'
+)
+
+census_data <-
+  left_join(S1701_Poverty_Tracts,
+            S1602_LEP_Tracts,
+            by = c("AFFGEOID", "geographic_area_name"))
+
+census_data <-
+  census_data %>% separate('geographic_area_name',
+                           c("census_tract", "county", "state"),
+                           sep = ", ")
+census_data$county <-
+  gsub(' County', '', census_data$county, fixed = TRUE)
+census_data$census_tract <-
+  gsub('Census Tract ', '', census_data$census_tract, fixed = TRUE)
+
+census_data <-
+  left_join(census_data, SNAP_Ed_Regions[, c("Region", "County")], by = c("county" = "County")) %>%
+  rename(region = "Region")
+
+census_data2 <- census_data %>% 
+  select(-c(AFFGEOID, county, total_population, census_tract, state, total_lep_households))
+```
+
+As with the previous study, variables are renamed and the predictor for non-Hispanic/Latino origin is calculated as the complement of `total_population_hispanic_or_latino_origin`. The data from each census subject table are then joined into a single data frame. Once `geographic_area_name` is separated, the `county` values for each census tract are cleaned and joined with their respective SNAP-Ed region. Thus, `region` provides the categorical predictor for the model with the following possible values: `r sort(unique(census_data$region))`. The final model data set, `census_data2`, excludes fields that are not relevant to the analysis. 
+
+### Correlation Analysis
+
+The partial correlation coefficients between `individuals_income_below_185_percent_poverty_level` and various racial and ethnic predictors controlling for the effect of the remaining variables are calculated.
+
+```{r}
+snap_eligibility_remove_latino =
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ . - total_population_hispanic_or_latino_origin,
+    data = census_data2
+  )
+snap_eligibility_latino = 
+  lm(
+    total_population_hispanic_or_latino_origin ~ . - individuals_income_below_185_percent_poverty_level,
+    data = census_data2
+  )
+cor(resid(snap_eligibility_remove_latino), resid(snap_eligibility_latino))
+```
+
+```{r}
+snap_eligibility_remove_Asian = 
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ . - total_population_asian,
+    data = census_data2
+  )
+snap_eligibility_Asian =
+  lm(
+    total_population_asian ~ . - individuals_income_below_185_percent_poverty_level,
+    data = census_data2
+  )
+
+cor(resid(snap_eligibility_remove_Asian), resid(snap_eligibility_Asian))
+```
+
+```{r}
+snap_eligibility_remove_white =
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ . - total_population_white,
+    data = census_data2
+  )
+
+snap_eligibility_white = 
+  lm(
+    total_population_white ~ . - individuals_income_below_185_percent_poverty_level,
+    data = census_data2
+  )
+
+cor(resid(snap_eligibility_remove_white), resid(snap_eligibility_white))
+```
+
+```{r}
+snap_eligibility_remove_black =
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ . - total_population_black_or_african_american,
+    data = census_data2
+  )
+
+snap_eligibility_black = 
+  lm(
+    total_population_black_or_african_american ~ . - individuals_income_below_185_percent_poverty_level,
+    data = census_data2
+  )
+
+cor(resid(snap_eligibility_remove_black), resid(snap_eligibility_black))
+```
+
+```{r}
+snap_eligibility_remove_Indian_alaska_native =
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ . - total_population_american_indian_and_alaska_native,
+    data = census_data2
+  )
+
+snap_eligibility_Indian_alaska_native =
+  lm(
+    total_population_american_indian_and_alaska_native ~ . - individuals_income_below_185_percent_poverty_level,
+    data = census_data2
+  )
+
+cor(resid(snap_eligibility_remove_Indian_alaska_native), resid(snap_eligibility_Indian_alaska_native))
+```
+
+```{r}
+snap_eligibility_remove_islander =
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ . - total_population_native_hawaiian_and_other_pacific_islander,
+    data = census_data2
+  )
+
+snap_eligibility_islander = 
+  lm(
+    total_population_native_hawaiian_and_other_pacific_islander ~ . - individuals_income_below_185_percent_poverty_level,
+    data = census_data2
+  )
+
+cor(resid(snap_eligibility_remove_islander), resid(snap_eligibility_islander))
+```
+
+### Model Selection
+
+#### Race and Ethnicity Additive Model
+
+The first model is an additive model of response `individuals_income_below_185_percent_poverty_level` and all remaining variables as predictors. 
+
+```{r}
+snap_eligibility_add <-
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ total_population_white +
+      total_population_american_indian_and_alaska_native +
+      total_population_black_or_african_american +
+      total_population_american_indian_and_alaska_native +
+      total_population_asian +
+      total_population_native_hawaiian_and_other_pacific_islander +
+      total_population_hispanic_or_latino_origin +
+      total_population_non_hispanic_or_latino_origin,
+    data = census_data2
+  )
+
+snap_eligibility_add_adj_r_2 <- summary(snap_eligibility_add)$adj.r.squared
+snap_eligibility_add_adj_r_2 
+```
+
+The adjusted $R^2$ of `r snap_eligibility_add_adj_r_2` is already much better than the models tested in the first study using `num_participants` as the response.
+
+#### Race and Ethnicity Interaction Model
+
+Since race and ethnicity are not mutually exclusive, the second model considers the interactions between ethnicity predictors and racial predictors.
+
+```{r}
+snap_eligibility_int1 <-
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ (
+      total_population_white +
+        total_population_american_indian_and_alaska_native +
+        total_population_black_or_african_american +
+        total_population_american_indian_and_alaska_native +
+        total_population_asian +
+        total_population_native_hawaiian_and_other_pacific_islander
+    ) *
+      (
+        total_population_hispanic_or_latino_origin +
+          total_population_non_hispanic_or_latino_origin
+      ),
+    data = census_data2
+  )
+
+snap_eligibility_int1_adj_r_2 <- summary(snap_eligibility_int1)$adj.r.squared
+snap_eligibility_int1_adj_r_2 
+```
+
+When exploring interaction between race and ethnicity, the new model's adjusted $R^2$ of `r snap_eligibility_int1_adj_r_2` only has limited improvement from the adjusted $R^2$ of the additive model. 
+
+#### All Possible Two-Way Interactions Model
+
+Next, all possible two-way interactions are considered to determine what affect they have on the model.
+
+```{r}
+snap_eligibility_int2 <-
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ (.)^2,
+    data = census_data2
+  )
+
+snap_eligibility_int2_adj_r_2 <- summary(snap_eligibility_int2)$adj.r.squared
+snap_eligibility_int2_adj_r_2
+
+length(snap_eligibility_int2$coefficients)
+```
+
+As a result of the all possible two-way interactions model, the adjusted $R^2$ (`r snap_eligibility_int2_adj_r_2`) is significantly increased by around 20%. However, using all two-way interaction is very time-consuming and this model contains many variables with high partial correlation and collinearity. A model with too many predictors is also harder to explain. Since the goal of this study is to produce a model with high explainability, AIC and BIC backward searches are conducted to simplify the model and filter out the unnecessary variables. 
+
+#### AIC Backward Search
+
+We initially employed AIC backward search using the all possible two-way interactions model as a starting point.
+
+```{r}
+snap_eligibility_int_aic <- step(snap_eligibility_int2, trace = FALSE)
+
+snap_eligibility_int_aic_adj_r_2 <- summary(snap_eligibility_int_aic)$adj.r.squared
+snap_eligibility_int_aic_adj_r_2 
+
+length(coef(snap_eligibility_int_aic))
+```
+
+The adjusted $R^2$ of AIC backward search model is `r snap_eligibility_int_aic_adj_r_2`. However, the model selected by AIC still contains many predictors.
+
+#### BIC Backward Search
+
+Because BIC carries a higher penalty for additional predictors, a BIC search should select a more suitable model.
+
+```{r}
+n <- nrow(census_data2)
+
+snap_eligibility_int_bic <- step(snap_eligibility_int2, trace = FALSE, k = log(n))
+
+snap_eligibility_int_bic_adj_r_2 <- summary(snap_eligibility_int_bic)$adj.r.squared
+snap_eligibility_int_bic_adj_r_2
+
+length(coef(snap_eligibility_int_bic))
+```
+
+Compared to AIC search, BIC search manages to select far fewer variables without significantly reducing the adjusted $R^2$, which is `r snap_eligibility_int_bic_adj_r_2`. 
+The BIC backward search starting from the all possible two-way interactions model provides the best model so far. 
+
+### Removing the Outilers (Clean Data)
+
+To further explore better models, outliers in the dataset are filtered out based on the Cook's distance. All the influential observations are removed. 
+The best model discussed above is retrained on the clean dataset to explore any improvement resulting from this data cleaning.
+First, the full two-way interactions model is built as the starting point using all possible variables. 
+
+```{r}
+clean_data = census_data2[cooks.distance(snap_eligibility_int_bic) < 4 / length(cooks.distance(snap_eligibility_int_bic)),]
+snap_eligibility_int2_clean <-
+  lm(
+    individuals_income_below_185_percent_poverty_level ~ (.)^2,
+    data = clean_data
+  )
+
+snap_eligibility_int2_clean_adj_r_2 <- summary(snap_eligibility_int2_clean)$adj.r.squared
+snap_eligibility_int2_clean_adj_r_2
+```
+
+### BIC Backward Search Using Clean Data
+
+Next, BIC backward search is conducted to simplify the two-way interaction model above.  
+
+```{r}
+n <- nrow(clean_data)
+
+snap_eligibility_int_bic_clean <- step(snap_eligibility_int2_clean, trace = FALSE, k = log(n))
+
+snap_eligibility_int_bic_clean_adj_r_2 <- summary(snap_eligibility_int_bic_clean)$adj.r.squared
+snap_eligibility_int_bic_clean_adj_r_2
+length(coef(snap_eligibility_int_bic_clean))
+```
+The adjusted $R^2$ of the selected two-way interactions model trained on the clean data is `r snap_eligibility_int_bic_clean_adj_r_2`. In addition, only 34 variables are left in the new selected interaction model. 
+
+#### Collinearity Analysis
+
+The collinearity analysis is done for all the models shown above. 
+
+```{r}
+library(faraway)
+snap_eligibility_add_colinearity_rate = mean(vif(snap_eligibility_add)>5)
+snap_eligibility_int1_colinearity_rate = mean(vif(snap_eligibility_int1)>5)
+snap_eligibility_int2_colinearity_rate = mean(vif(snap_eligibility_int2)>5)
+snap_eligibility_int_aic_colinearity_rate = mean(vif(snap_eligibility_int_aic)>5)
+snap_eligibility_int_bic_colinearity_rate = mean(vif(snap_eligibility_int_bic)>5)
+snap_eligibility_int_bic_clean_colinearity_rate = mean(vif(snap_eligibility_int_bic_clean)>5)
+```
+
+#### LOOCV RMSE
+
+LOOCV RMSE is calculated to evaluate the effectiveness of the variable selection of different models. 
+
+```{r}
+calc_loocv_rmse = function(model) {
+  sqrt(mean((resid(model) / (1 - hatvalues(model))) ^ 2))
+}
+
+snap_eligibility_add_loocv_rmse = calc_loocv_rmse(snap_eligibility_add)
+snap_eligibility_int1_loocv_rmse = calc_loocv_rmse(snap_eligibility_int1)
+snap_eligibility_int2_loocv_rmse = calc_loocv_rmse(snap_eligibility_int2)
+snap_eligibility_int_aic_loocv_rmse = calc_loocv_rmse(snap_eligibility_int_aic)
+snap_eligibility_int_bic_loocv_rmse = calc_loocv_rmse(snap_eligibility_int_bic)
+snap_eligibility_int_bic_clean_loocv_rmse = calc_loocv_rmse(snap_eligibility_int_bic_clean)
+```
+
+## Results
+
+### Predictor Coefficients Summary
+
+**Table 1:** BIC Backward Search Model of Clean Data Coefficient Summary
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+tab1 <- data.frame(coef(summary(snap_eligibility_int_bic_clean)))
+tab1 <- tab1[order(tab1$Estimate, decreasing = TRUE), ]
+kable(tab1,
+      col.names = c('Estimate',
+                    'Std. Error',
+                    't.value',
+                    'p.value'))
+```
+
+### Correlation Analysis
+
+**Table 2:** Partial Correlation Coefficients Summary
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+correlation_table = data.frame(Variables = c("Hispanic_Latino_Origin","Asian","White","Black_African_American","Indian_Alaska_Native","Pacific_Islander"),
+Partial_Correlation_Coefficients = c(
+    cor(resid(snap_eligibility_remove_latino), resid(snap_eligibility_latino)),
+    cor(resid(snap_eligibility_remove_Asian), resid(snap_eligibility_Asian)),
+    cor(resid(snap_eligibility_remove_white), resid(snap_eligibility_white)),
+    cor(resid(snap_eligibility_remove_black), resid(snap_eligibility_black)),
+    cor(resid(snap_eligibility_remove_Indian_alaska_native), resid(snap_eligibility_Indian_alaska_native)),
+    cor(resid(snap_eligibility_remove_islander), resid(snap_eligibility_islander))
+    )
+)
+kable(correlation_table)
+```
+
+**Figure 1:** Partial Correlation Coefficients
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(ggplot2)
+
+ggplot(correlation_table, aes(x=Variables, y=Partial_Correlation_Coefficients, fill=Variables)) +
+                 geom_col(show.legend = FALSE) +                 
+                 theme(axis.text.x = element_text(angle = 45, hjust = 1),
+                       axis.title.x = element_blank(), axis.title.y = element_blank(),
+                       plot.title = element_text(hjust = 0.5)) +
+                 ggtitle("Partial Correlation Coefficients")
+```
+
+### Model Diagnostics
+
+In this sub-section, the assumptions of normality and equal variance of all six models listed above are tested.  
+
+#### Checking the Normality Assumption
+
+Q-Q plots are shown to visualize the normality of each model's data. 
+
+**Figure 2:** Q-Q Plots for Assessed Models
+```{r fig.height=8, fig.width=12, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow = c(2, 3))
+qqnorm(resid(snap_eligibility_add), main = "Normal Q-Q Plot, add", col = "darkgrey")
+qqline(resid(snap_eligibility_add), col = "dodgerblue", lwd = 2)
+
+qqnorm(resid(snap_eligibility_int1), main = "Normal Q-Q Plot, int1", col = "darkgrey")
+qqline(resid(snap_eligibility_int1), col = "dodgerblue", lwd = 2)
+
+qqnorm(resid(snap_eligibility_int2), main = "Normal Q-Q Plot, int2", col = "darkgrey")
+qqline(resid(snap_eligibility_int2), col = "dodgerblue", lwd = 2)
+
+qqnorm(resid(snap_eligibility_int_aic), main = "Normal Q-Q Plot, int AIC", col = "darkgrey")
+qqline(resid(snap_eligibility_int_aic), col = "dodgerblue", lwd = 2)
+
+qqnorm(resid(snap_eligibility_int_bic), main = "Normal Q-Q Plot, int BIC", col = "darkgrey")
+qqline(resid(snap_eligibility_int_bic), col = "dodgerblue", lwd = 2)
+
+qqnorm(resid(snap_eligibility_int_bic_clean), main = "Normal Q-Q Plot, int BIC clean", col = "darkgrey")
+qqline(resid(snap_eligibility_int_bic_clean), col = "dodgerblue", lwd = 2)
+```
+
+#### Shapiro-Wilk Test
+
+The Shapiro-Wilk Test is conducted to provide the value of the test statistic and its p-value.
+
+```{r}
+snap_eligibility_add_sw_test = shapiro.test(resid(snap_eligibility_add))$p.value
+snap_eligibility_int1_sw_test = shapiro.test(resid(snap_eligibility_int1))$p.value
+snap_eligibility_int2_sw_test = shapiro.test(resid(snap_eligibility_int2))$p.value
+snap_eligibility_int_aic_sw_test = shapiro.test(resid(snap_eligibility_int_aic))$p.value
+snap_eligibility_int_bic_sw_test = shapiro.test(resid(snap_eligibility_int_bic))$p.value
+snap_eligibility_int_bic_sw_test = shapiro.test(resid(snap_eligibility_int_bic))$p.value
+snap_eligibility_int_bic_clean_sw_test = shapiro.test(resid(snap_eligibility_int_bic_clean))$p.value
+```
+
+The results will be summarized subsequently in **Table 3** at the end of the Results section. 
+
+#### Checking the Linearity and Constant Variance Assumptions
+
+Fitted versus Residuals Plots are used to visualize the linearity and variance of each model.
+
+**Figure 3:**  Fitted versus Residuals Plots for Assessed Models
+```{r fig.height=8, fig.width=12, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow = c(2, 3))
+plot(fitted(snap_eligibility_add), resid(snap_eligibility_add), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Data from Add Model")
+abline(h = 0, col = "darkorange", lwd = 2)
+
+plot(fitted(snap_eligibility_int1), resid(snap_eligibility_int1), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Data from  Int1 Model")
+abline(h = 0, col = "darkorange", lwd = 2)
+
+plot(fitted(snap_eligibility_int2), resid(snap_eligibility_int2), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Data from  Int2 Model")
+abline(h = 0, col = "darkorange", lwd = 2)
+
+plot(fitted(snap_eligibility_int_aic), resid(snap_eligibility_int_aic), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Data from  Int AIC Model")
+abline(h = 0, col = "darkorange", lwd = 2)
+
+plot(fitted(snap_eligibility_int_bic), resid(snap_eligibility_int_bic), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Data from  Int BIC Model")
+abline(h = 0, col = "darkorange", lwd = 2)
+
+plot(fitted(snap_eligibility_int_bic_clean), resid(snap_eligibility_int_bic_clean), col = "grey", pch = 20,
+     xlab = "Fitted", ylab = "Residuals", main = "Data from  Int BIC clean Model")
+abline(h = 0, col = "darkorange", lwd = 2)
+```
+
+#### Breusch-Pagan Test
+
+The Breusch-Pagan Test is used to offer a formal test of the equal variance assumption. 
+
+```{r message=FALSE, warning=FALSE}
+library(lmtest)
+snap_eligibility_add_bp_test = bptest(snap_eligibility_add)$p.value
+snap_eligibility_int1_bp_test = bptest(snap_eligibility_int1)$p.value
+snap_eligibility_int2_bp_test = bptest(snap_eligibility_int2)$p.value
+snap_eligibility_int_aic_bp_test = bptest(snap_eligibility_int_aic)$p.value
+snap_eligibility_int_bic_bp_test = bptest(snap_eligibility_int_bic)$p.value
+snap_eligibility_int_bic_clean_bp_test = bptest(snap_eligibility_int_bic_clean)$p.value
+```
+
+#### Checking the Leverage
+
+Leverage value is calculated to measure the influence of each observation. The proportion of observations with large leverage values is calculated for the models assessed. 
+
+```{r}
+# percentage of large leverage
+snap_eligibility_add_large_rate = mean(hatvalues(snap_eligibility_add) > 2 * mean(hatvalues(snap_eligibility_add)))
+snap_eligibility_int1_large_rate = mean(hatvalues(snap_eligibility_int1) > 2 * mean(hatvalues(snap_eligibility_int1)))
+snap_eligibility_int2_large_rate = mean(hatvalues(snap_eligibility_int2) > 2 * mean(hatvalues(snap_eligibility_int2)))
+snap_eligibility_int_aic_large_rate = mean(hatvalues(snap_eligibility_int_aic) > 2 * mean(hatvalues(snap_eligibility_int_aic)))
+snap_eligibility_int_bic_large_rate = mean(hatvalues(snap_eligibility_int_bic) > 2 * mean(hatvalues(snap_eligibility_int_bic)))
+snap_eligibility_int_bic_clean_large_rate = mean(hatvalues(snap_eligibility_int_bic_clean) > 2 * mean(hatvalues(snap_eligibility_int_bic_clean)))
+```
+
+#### Cook's Distance
+
+Another measure of influence uses Cook's Distance, which considers both leverage and standardized residuals. 
+
+```{r}
+# percentage of influential
+snap_eligibility_add_influential_rate = mean(cooks.distance(snap_eligibility_add) > 4 / length(cooks.distance(snap_eligibility_add)))
+snap_eligibility_int1_influential_rate = mean(cooks.distance(snap_eligibility_int1) > 4 / length(cooks.distance(snap_eligibility_int1)))
+snap_eligibility_int2_influential_rate = mean(cooks.distance(snap_eligibility_int2) > 4 / length(cooks.distance(snap_eligibility_int2)))
+snap_eligibility_int_aic_influential_rate = mean(cooks.distance(snap_eligibility_int_aic) > 4 / length(cooks.distance(snap_eligibility_int_aic)))
+snap_eligibility_int_bic_influential_rate = mean(cooks.distance(snap_eligibility_int_bic) > 4 / length(cooks.distance(snap_eligibility_int_bic)))
+snap_eligibility_int_bic_clean_influential_rate = mean(cooks.distance(snap_eligibility_int_bic_clean) > 4 / length(cooks.distance(snap_eligibility_int_bic_clean)))
+```
+
+
+### Model Analysis Summary
+
+The summary of the aforementioned model analyses are listed in the following table.
+
+**Table 3:** Summary of Models Analyzed
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+final_result = data.frame(Model = c('Additive Model', 
+                                    'Race-Ethnicity Two-way Interaction Model', 
+                                    'Full Two-way Interaction Model', 
+                                    'AIC Selected Model', 
+                                    'BIC Selected Model',
+                                    'BIC Selected Clean Model'),
+                          Beta_Parameters = c(
+                            length(snap_eligibility_add$coefficients),
+                            length(snap_eligibility_int1$coefficients),
+                            length(snap_eligibility_int2$coefficients),
+                            length(snap_eligibility_int_aic$coefficients),
+                            length(coef(snap_eligibility_int_bic)),
+                            length(coef(snap_eligibility_int_bic_clean))), 
+                          Adjusted_R_2 = c(snap_eligibility_add_adj_r_2, 
+                                           snap_eligibility_int1_adj_r_2, 
+                                           snap_eligibility_int2_adj_r_2, 
+                                           snap_eligibility_int_aic_adj_r_2, 
+                                           snap_eligibility_int_bic_adj_r_2,
+                                           snap_eligibility_int_bic_clean_adj_r_2),
+                          Shapiro_Wilk_Test = c(snap_eligibility_add_sw_test, 
+                                                snap_eligibility_int1_sw_test, 
+                                                snap_eligibility_int2_sw_test, 
+                                                snap_eligibility_int_aic_sw_test, 
+                                                snap_eligibility_int_bic_sw_test,
+                                                snap_eligibility_int_bic_clean_sw_test),
+                          Breusch_Pagan_Test = c(snap_eligibility_add_bp_test, 
+                                                 snap_eligibility_int1_bp_test, 
+                                                 snap_eligibility_int2_bp_test, 
+                                                 snap_eligibility_int_aic_bp_test, 
+                                                 snap_eligibility_int_bic_bp_test,
+                                                 snap_eligibility_int_bic_clean_bp_test),
+                          Large_leverage_rate = c(snap_eligibility_add_large_rate, 
+                                                  snap_eligibility_int1_large_rate, 
+                                                  snap_eligibility_int2_large_rate, 
+                                                  snap_eligibility_int_aic_large_rate,
+                                                  snap_eligibility_int_bic_large_rate,
+                                                  snap_eligibility_int_bic_clean_large_rate),
+                          Influential_rate = c(snap_eligibility_add_influential_rate, 
+                                               snap_eligibility_int1_influential_rate, 
+                                               snap_eligibility_int2_influential_rate,
+                                               snap_eligibility_int_aic_influential_rate,
+                                               snap_eligibility_int_bic_influential_rate,
+                                               snap_eligibility_int_bic_clean_influential_rate),
+                          Colinearity_rate = c(snap_eligibility_add_colinearity_rate, 
+                                               snap_eligibility_int1_colinearity_rate, 
+                                               snap_eligibility_int2_colinearity_rate,
+                                               snap_eligibility_int_aic_colinearity_rate,
+                                               snap_eligibility_int_bic_colinearity_rate,
+                                               snap_eligibility_int_bic_clean_colinearity_rate),
+                          LOOCV_RMSE = c(snap_eligibility_add_loocv_rmse, 
+                                        snap_eligibility_int1_loocv_rmse, 
+                                        snap_eligibility_int2_loocv_rmse,
+                                        snap_eligibility_int_aic_loocv_rmse,
+                                        snap_eligibility_int_bic_loocv_rmse,
+                                        snap_eligibility_int_bic_clean_loocv_rmse)
+                          )
+
+kable(final_result, 
+      col.names = c('Model',
+                    'Beta Parameters',
+                    'Adjusted R_2',
+                    'Shapiro-Wilk Test',
+                    'Breusch-Pagan Test',
+                    'Large leverage Rate',
+                    'Influential Rate',
+                    'Colinearity Rate',
+                    'LOOCV-RMSE'), 
+      digits = 3
+      )
+
+```
+
+
+## Discussion
+
+### Correlation Analysis
+
+The partial correlation coefficients were initially used to evaluate whether specific race and ethnicity predictors should be added to the model. However, each variable had a relatively small partial correlation coefficient. Since 12 predictors were included in the model dataset, calculating the partial correlation coefficient for each one would be tedious. Therefore, AIC and BIC search methods were ultimately used to select model variables. The evaluation of those models is as follows.
+
+### Adjusted $R^2$
+
+In **Table 3** column 3, compared with additive model, the number of two-way interaction variables can significantly increase the adjusted $R^2$, which means that models with more interaction terms can better predict SNAP-Ed eligibility. Furthermore, the variable selection can slightly improve the adjusted $R^2$ and removing outlier observations from the dataset also benefits model predictive capability. 
+
+### Model Diagnostics
+
+#### Normality Assumption
+
+Based on the Q-Q plots in **Figure 2**, all models violate the normality, but points fits the blue line better after removing the outliers. The **Shapiro-Wilk Test** returns the value of the test statistic and its p-value. ALL p-values of the test are small, which means that the normality assumption is suspect for all models.
+
+#### Constant Variance Assumption
+
+**Figure 3** shows a clear trend that the residual variance increases with the fitted value for each model. The **Breusch-Pagan Test** provides the test statistic and p-value for the hypothesis that the constant variance assumption is valid. However, the p-values of all models are small so that hypothesis is rejected in each case. Thus, the constant variance assumption is violated by each model in this study. 
+
+In conclusion, both assumptions are rejected. However, this is commonplace when dealing with large scale real-world datasets. For such a large dataset, linear regression and related techniques alone are not sufficient to estimate the relationship between the response, `individuals_income_below_185_percent_poverty_level`, and the other predictors. Therefore, this phenomenon is acceptable for this project. 
+
+#### Unusual Observations
+
+In addition to checking the assumptions of regression, “unusual observations” in the data are also evaluated in this project. Sometimes points with extremely large influence will cause the model to violate those assumptions as well. Both **leverage** and **Cook's Distance** are considered to calculate the influence of an observation. The way to quantify those influence parameters is to calculate the rate of influential observations in the whole dataset. As shown in **Table 3**, the model with interaction variables have higher overall influential rate and the portion of influential observation can be reduced by filtering out the outliers. In this project, only influential points using Cook's distance are removed. Therefore only the `Influenctial Rate` is reduced by cleaning data. 
+
+### Collinearity Rate
+
+The effect of collinearity of variance of those regression estimates are quantified using the variance inflation factor (VIF). To compare the effect of collinearity between different models, the overall collinearity rate is calculated to summarize the portion of the variables that are considered highly collinear with other variables. **Table 3** shows that the collinearity rates of each model are fairly close to each other. Even the best model using BIC search with clean data still has a relatively higher collinearity rate. This is expected due to the nature of the data. Each numerical predictor is a subset of total population or households by race, ethnicity, and language. These demographic categories are not mutually exclusive. For example, the non-hispanic population is linear combination of the populations for each race. Furthermore, total households that speak Spanish will certainly have a linear relationship with the total individuals with hispanic or latino origin.
+
+### LOOCV-RMSE
+
+The leave-one-out cross-validated RMSE is a comprehensive evaluation of the performance of a model. By comparing the models in **Table 3**, we determine that the model can be improved by the following operations:
+
+- Adding interaction terms
+- BIC backward search
+- Removing outliers
+
+Finally, the best model to predict `individuals_income_below_185_percent_poverty_level` is the BIC Interaction Model using clean data. 
+
+## Selected Model Interpretation
+
+Since the BIC selected model using clean data is the best model to predict total number of SNAP-Ed eligibible individuals, **Table 1** provides the $\beta$ estimate, standard error, t-value, and p-value for each of its predictors. The table is sorted by `Estimate` in descending order. `(Intercept)` is the coefficient for the East `region`, as factor variables are given levels alphabetically by default. As such, the East SNAP-Ed region has the greatest coefficient, meaning this region has the greatest positive impact on `individuals_income_below_185_percent_poverty_level`. Likewise, `regionSouth`, the dummy variable for the southern SNAP-Ed region has a significant positive impact on SNAP-Ed eligibility and the remaining dummy variables have the greatest negative impacts. Total limited English proficiency households for various languages also have high $\beta$ parameters, implying that average `individuals_income_below_185_percent_poverty_level` increases significantly for each additional limited English proficiency household in a census tract. This highlights the growing need for tailoring SNAP-Ed programming to communities with limited English proficiency. Further studies exploring SNAP-Ed reach among eligible individuals with limited English proficiency may be worthwhile. Following the aforementioned parameter estimates are `total_population_hispanic_or_latino_origin` and `total_population_black_or_african_american`, which comports with Illinois Extension's conventional knowledge of SNAP-Ed eligible communities. On the other hand, the most negative estimates are for `total_population_asian:regionWest`, `total_population_hispanic_or_latino_origin:regionWest`, and `total_population_hispanic_or_latino_origin:regionNortheast`, suggesting that regional interactions with various ethnicities and races reduce the average total SNAP-Ed eligible individuals. In other words, certain communities may have fewer low-income individuals depending on their regional location in Illinois. This emphasizes the importance of understanding local socioeconomic characteristics of different communities when planning SNAP-Ed programming. 
+
+## Appendix
+
+### Group Members
+
+- Jamie Stadnik, jstadni2@illinois.edu
+- Feiran Zhang, feiranz2@illinois.edu
+- Guanghao Zhai, gzhai4@illinois.edu
